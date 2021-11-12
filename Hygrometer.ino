@@ -6,8 +6,8 @@
   NPNs activated via 8th bit in 74HC595s, always alternating
 
   Author:   ElectroBadger
-  Date:     2021-11-09
-  Version:  2.0
+  Date:     2021-11-12
+  Version:  3.0
 */
 
 /*
@@ -17,7 +17,6 @@
   - Use SLEEP_MODE_PWR_DOWN
 */
 
-//#include "DHT.h"      // DHT-11 sensor
 #include <avr/sleep.h>  // Sleep Modes
 #include <avr/power.h>  // Power management
 #include <avr/wdt.h>    // Doggy stuff
@@ -31,7 +30,7 @@
 
 // define other stuff
 //#define SENSOR_TYPE DHT11
-#define LED_DELAY 50
+#define LED_DELAY 5
 
 //fixed variables
 //array lookup for number display; ascending order: 0, 1, 2, ...
@@ -49,12 +48,12 @@ const byte numLookup[] = {
 }; 
 
 // changing variables
-short ones_data;                // 16-bits for display of ones
-short tens_data;                // 16-bits for display of tens
-byte sevSeg, measurements;      // 7-segment bit pattern / wait time between LEDs [ms] / # of measurements taken
-bool firstPair, btnPress;       // tracks which pair of 7-segments is on; tracks button presses
-uint32_t oldMillis, sleepTimer; // tracks the last acquisition time and wakeup time
-byte humI, humD, tempI, tempD;  // values of humidity and temperature (we're only gonna need integral parts but I need all for the checksum)
+short ones_data;                          // 16-bits for display of ones
+short tens_data;                          // 16-bits for display of tens
+byte sevSeg, measurements;                // 7-segment bit pattern / wait time between LEDs [ms] / # of measurements taken
+bool firstPair, btnPress, readTriggered;  // tracks which pair of 7-segments is on; tracks button presses; tracks if a reading was requested
+uint32_t oldMillis, sleepTimer;           // tracks the last acquisition time and wakeup time
+byte humI, humD, tempI, tempD;            // values of humidity and temperature (we're only gonna need integral parts but I need all for the checksum)
 
 // Initialize sensor
 //DHT dht(SENSOR, SENSOR_TYPE);
@@ -222,25 +221,28 @@ void setup() {
   measurements = 0;
   firstPair = true;
   btnPress = false;
+  readTriggered = false;
   oldMillis = 0;
   sleepTimer = 0;
   humI = 0;
   humD = 0;
   tempI = 0;
   tempD = 0;
-  
-  // Start sensor
-  //dht.begin();
 
   sei(); // enable interrupts after setup
+
+  digitalWrite(LATCH, 0); // Set latch pin LOW so nothing gets shifted out
+  shiftOut(DATA, CLK, tens_data); // shift out LED states for 7-segments of tens
+  digitalWrite(LATCH, 1); //sent everything out in parallel
 }
 
 void loop() {
-  if ((millis() - oldMillis) > 1000) {
+  if (!readTriggered && (millis() - oldMillis) > 2000) {
+    readTriggered = true;
+    oldMillis = millis();
+  }
+  else if(readTriggered && (millis() - oldMillis) > 2000){
     // slow sensor, so readings may be up to 2 seconds old
-    //byte hum = dht.readHumidity(); //Read humidity
-    //byte temp = dht.readTemperature(); //Read temperatuer in °C
-    delay(2000); // wait for DHT11 to start up
     start_signal(SENSOR); // send start sequence
 
     if(read_dht11(SENSOR)){
@@ -250,7 +252,7 @@ void loop() {
       tens_data = tens_data << 8;         // shift by 8 so it's almost in the right place (see below)
       tens_data |= numLookup[tempI / 10]; // bitwise OR the result with the output short
       tens_data = tens_data << 1;         // shift by 1 so everything is in the right place
-      tens_data |= 0b0000000100000000;    // set NPN for tens pair to active and ones NPN to inactive
+      tens_data |= 0b0000000000000001;    // set NPN for tens pair to active and ones NPN to inactive
   
       // update ones bit string
       ones_data = 0b0000000000000000;     // reset to all 0s
@@ -258,12 +260,14 @@ void loop() {
       ones_data = ones_data << 8;         // shift by 8 so it's almost in the right place (see below)
       ones_data |= numLookup[tempI % 10]; // bitwise OR the result with the output short
       ones_data = ones_data << 1;         // shift by 1 so everything is in the right place
-      ones_data |= 0b0000000000000001;    // set NPN for ones pair to active and tens NPN to inactive
+      ones_data |= 0b0000000100000000;    // set NPN for ones pair to active and tens NPN to inactive
     }
     else{
-      tens_data = 0b1001111110011100;
-      ones_data = 0b0000101000001011;
+      tens_data = 0b1001111010011111;
+      ones_data = 0b0000101100001010;
     }
+
+    readTriggered = false;
     oldMillis = millis(); // I don't much care about the few ms lost during data acquisition
   }
 
