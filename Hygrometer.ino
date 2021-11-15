@@ -29,7 +29,6 @@
 #define CLK PB0
 
 // define other stuff
-//#define SENSOR_TYPE DHT11
 #define LED_DELAY 5
 
 //fixed variables
@@ -268,7 +267,8 @@ void loop() {
     }
 
     readTriggered = false;
-    oldMillis = millis(); // I don't much care about the few ms lost during data acquisition
+    measurements++;
+    oldMillis = millis();
   }
 
   if (btnPress) {
@@ -292,7 +292,7 @@ void loop() {
     }
   }
   else {
-    if (measurements > 3) {
+    if (measurements > 2) {
       goToSleep();
     }
   }
