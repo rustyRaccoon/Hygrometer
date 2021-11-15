@@ -6,15 +6,15 @@
   NPNs activated via 8th bit in 74HC595s, always alternating
 
   Author:   ElectroBadger
-  Date:     2021-11-12
-  Version:  3.0
+  Date:     2021-11-15
+  Version:  4.0
 */
 
 /*
   Reduce power consumption:
-  - Run at 1 MHz internal clock
   - Turn off ADC
   - Use SLEEP_MODE_PWR_DOWN
+  - Only really wake up every 5 minutes to update measurements (or on btn press)
 */
 
 #include <avr/sleep.h>  // Sleep Modes
@@ -44,15 +44,15 @@ const byte numLookup[] = {
   0b01110000, //7
   0b01111111, //8
   0b01111011  //9
-}; 
+};
 
 // changing variables
-short ones_data;                          // 16-bits for display of ones
-short tens_data;                          // 16-bits for display of tens
-byte sevSeg, measurements;                // 7-segment bit pattern / wait time between LEDs [ms] / # of measurements taken
-bool firstPair, btnPress, readTriggered;  // tracks which pair of 7-segments is on; tracks button presses; tracks if a reading was requested
-uint32_t oldMillis, sleepTimer;           // tracks the last acquisition time and wakeup time
-byte humI, humD, tempI, tempD;            // values of humidity and temperature (we're only gonna need integral parts but I need all for the checksum)
+short ones_data;                                      // 16-bits for display of ones
+short tens_data;                                      // 16-bits for display of tens
+byte sevSeg, measurements, sleepCounter;              // 7-segment bit pattern / # of measurements taken / sleep cycles since last measurement
+bool firstPair, btnPress, readTriggered, awakeTime;   // tracks which pair of 7-segments is on / tracks button presses / tracks if a reading was requested // tracks time when not to sleep
+uint32_t oldMillis, sleepTimer;                       // tracks the last acquisition time and wakeup time
+byte humI, humD, tempI, tempD;                        // values of humidity and temperature (we're only gonna need integral parts but I need all for the checksum)
 
 // Initialize sensor
 //DHT dht(SENSOR, SENSOR_TYPE);
@@ -157,12 +157,38 @@ boolean read_dht11(byte SENSOR_PIN) {
   }
 }
 
+void updateDisplay(){
+    start_signal(SENSOR); // send start sequence
+
+    if (read_dht11(SENSOR)) {
+      // update tens bit string
+      tens_data = 0b0000000000000000;     // reset to all 0s
+      tens_data |= numLookup[humI / 10];  // bitwise OR the result with the output short
+      tens_data = tens_data << 8;         // shift by 8 so it's almost in the right place (see below)
+      tens_data |= numLookup[tempI / 10]; // bitwise OR the result with the output short
+      tens_data = tens_data << 1;         // shift by 1 so everything is in the right place
+      tens_data |= 0b0000000000000001;    // set NPN for tens pair to active and ones NPN to inactive
+
+      // update ones bit string
+      ones_data = 0b0000000000000000;     // reset to all 0s
+      ones_data |= numLookup[humI % 10];  // bitwise OR the result with the output short
+      ones_data = ones_data << 8;         // shift by 8 so it's almost in the right place (see below)
+      ones_data |= numLookup[tempI % 10]; // bitwise OR the result with the output short
+      ones_data = ones_data << 1;         // shift by 1 so everything is in the right place
+      ones_data |= 0b0000000100000000;    // set NPN for ones pair to active and tens NPN to inactive
+    }
+    else {
+      tens_data = 0b1001111010011111;
+      ones_data = 0b0000101100001010;
+    }
+}
+
 void goToSleep() {
   // Turn off 7-segments and NPNs
   digitalWrite(LATCH, 0);
   shiftOut(DATA, CLK, 0b0000000000000000);
   digitalWrite(LATCH, 1);
-  
+
   set_sleep_mode (SLEEP_MODE_PWR_DOWN); // Set deep sleep mode
   ADCSRA = 0;                           // turn off ADC
   power_all_disable ();                 // power off ADC, Timer 0 and 1, serial interface
@@ -179,6 +205,7 @@ void goToSleep() {
 
 ISR(PCINT0_vect) {
   btnPress = true;
+  awakeTime = true;
   sleepTimer = millis();
 }
 
@@ -218,8 +245,10 @@ void setup() {
   ones_data = 0b0000000000000000;
   tens_data = 0b0000000000000000;
   measurements = 0;
+  sleepCounter = 0;
   firstPair = true;
   btnPress = false;
+  awakeTime = false;
   readTriggered = false;
   oldMillis = 0;
   sleepTimer = 0;
@@ -228,72 +257,66 @@ void setup() {
   tempI = 0;
   tempD = 0;
 
-  sei(); // enable interrupts after setup
-
-  digitalWrite(LATCH, 0); // Set latch pin LOW so nothing gets shifted out
+  digitalWrite(LATCH, 0);         // Set latch pin LOW so nothing gets shifted out
   shiftOut(DATA, CLK, tens_data); // shift out LED states for 7-segments of tens
-  digitalWrite(LATCH, 1); //sent everything out in parallel
+  digitalWrite(LATCH, 1);         //sent everything out in parallel
+
+  delay(2000);      // wait for DHT to be ready
+  updateDisplay();  // read DHT11 once in the beginning
+  
+  sei(); // enable interrupts after setup
 }
 
 void loop() {
-  if (!readTriggered && (millis() - oldMillis) > 2000) {
-    readTriggered = true;
-    oldMillis = millis();
-  }
-  else if(readTriggered && (millis() - oldMillis) > 2000){
-    // slow sensor, so readings may be up to 2 seconds old
-    start_signal(SENSOR); // send start sequence
-
-    if(read_dht11(SENSOR)){
-      // update tens bit string
-      tens_data = 0b0000000000000000;     // reset to all 0s
-      tens_data |= numLookup[humI / 10];  // bitwise OR the result with the output short
-      tens_data = tens_data << 8;         // shift by 8 so it's almost in the right place (see below)
-      tens_data |= numLookup[tempI / 10]; // bitwise OR the result with the output short
-      tens_data = tens_data << 1;         // shift by 1 so everything is in the right place
-      tens_data |= 0b0000000000000001;    // set NPN for tens pair to active and ones NPN to inactive
-  
-      // update ones bit string
-      ones_data = 0b0000000000000000;     // reset to all 0s
-      ones_data |= numLookup[humI % 10];  // bitwise OR the result with the output short
-      ones_data = ones_data << 8;         // shift by 8 so it's almost in the right place (see below)
-      ones_data |= numLookup[tempI % 10]; // bitwise OR the result with the output short
-      ones_data = ones_data << 1;         // shift by 1 so everything is in the right place
-      ones_data |= 0b0000000100000000;    // set NPN for ones pair to active and tens NPN to inactive
-    }
-    else{
-      tens_data = 0b1001111010011111;
-      ones_data = 0b0000101100001010;
-    }
-
-    readTriggered = false;
-    measurements++;
-    oldMillis = millis();
-  }
-
-  if (btnPress) {
-    // shift out the next batch of data to the display
-    digitalWrite(LATCH, 0); // Set latch pin LOW so nothing gets shifted out
-    
-    if (firstPair) {
-      shiftOut(DATA, CLK, tens_data); // shift out LED states for 7-segments of tens
-      firstPair = false;              // reset first digit flag
-    }
-    else {
-      shiftOut(DATA, CLK, ones_data); //Shift out LED states for 7-segments of ones
-      firstPair = true;               //set first digit flag
-    }
-    
-    digitalWrite(LATCH, 1); //sent everything out in parallel
-    delay(LED_DELAY);       //wait for some time until switching to the other displays
-
-    if ((millis() - sleepTimer) > 6000) { //Sleep after 6s display time
-      goToSleep();
-    }
+  // if 5 minutes are not over yet, increase counter and sleep again; button press overrules this
+  if (sleepCounter <= 38 && !btnPress) {
+    sleepCounter++;
+    goToSleep();
   }
   else {
-    if (measurements > 2) {
-      goToSleep();
+    awakeTime = true; //keep awake until action is done
+    
+    if (!readTriggered && (millis() - oldMillis) > 2000) {
+      readTriggered = true;
+      oldMillis = millis();
+    }
+    else if (readTriggered && (millis() - oldMillis) > 2000) {
+      // slow sensor, so readings may be up to 2 seconds old
+      updateDisplay();
+
+      readTriggered = false;
+      measurements++;
+      oldMillis = millis();
+    }
+
+    if (btnPress) {
+      // shift out the next batch of data to the display
+      digitalWrite(LATCH, 0); // Set latch pin LOW so nothing gets shifted out
+
+      if (firstPair) {
+        shiftOut(DATA, CLK, tens_data); // shift out LED states for 7-segments of tens
+        firstPair = false;              // reset first digit flag
+      }
+      else {
+        shiftOut(DATA, CLK, ones_data); //Shift out LED states for 7-segments of ones
+        firstPair = true;               //set first digit flag
+      }
+
+      digitalWrite(LATCH, 1); //sent everything out in parallel
+      delay(LED_DELAY);       //wait for some time until switching to the other displays
+
+      if ((millis() - sleepTimer) > 5000) { //Sleep after 6s display time
+        sleepCounter = 0;
+        awakeTime = false;
+        goToSleep();
+      }
+    }
+    else {
+      if (measurements >= 2) {
+        sleepCounter = 0;
+        awakeTime = false;
+        goToSleep();
+      }
     }
   }
 }
