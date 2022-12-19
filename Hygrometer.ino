@@ -4,17 +4,12 @@
   Two digits for temperature
   Button to wake up from sleep
   NPNs activated via 8th bit in 74HC595s, always alternating
+  
+  !! Needs to be set up with 8 MHz internal clock AND bootloader apparently !!
 
   Author:   ElectroBadger
-  Date:     2021-11-15
-  Version:  4.0
-*/
-
-/*
-  Reduce power consumption:
-  - Turn off ADC
-  - Use SLEEP_MODE_PWR_DOWN
-  - Only really wake up every 5 minutes to update measurements (or on btn press)
+  Date:     2022-12-19
+  Version:  5.0
 */
 
 #include <avr/sleep.h>  // Sleep Modes
@@ -22,18 +17,18 @@
 #include <avr/wdt.h>    // Doggy stuff
 
 // define attiny pins
-#define INT_PIN PB4
-#define DATA PB1
-#define SENSOR PB3
-#define LATCH PB2
 #define CLK PB0
+#define DATA PB1
+#define LATCH PB2
+#define SENSOR PB3
+#define INT_PIN PB4
 
 // define other stuff
 #define LED_DELAY 5
 
 //fixed variables
-//array lookup for number display; ascending order: 0, 1, 2, ...
-const byte numLookup[] = {
+uint8_t ignoreButton;         // time to ignore button presses for
+const byte numLookup[] = {    //array lookup for number display; ascending order: 0, 1, 2, ...
   0b01111110, //0
   0b00110000, //1
   0b01101101, //2
@@ -47,15 +42,22 @@ const byte numLookup[] = {
 };
 
 // changing variables
-short ones_data;                                      // 16-bits for display of ones
-short tens_data;                                      // 16-bits for display of tens
-byte sevSeg, measurements, sleepCounter;              // 7-segment bit pattern / # of measurements taken / sleep cycles since last measurement
-bool firstPair, btnPress, readTriggered, awakeTime;   // tracks which pair of 7-segments is on / tracks button presses / tracks if a reading was requested // tracks time when not to sleep
-uint32_t oldMillis, sleepTimer;                       // tracks the last acquisition time and wakeup time
-byte humI, humD, tempI, tempD;                        // values of humidity and temperature (we're only gonna need integral parts but I need all for the checksum)
-
-// Initialize sensor
-//DHT dht(SENSOR, SENSOR_TYPE);
+short ones_data;            // 16-bits for display of ones
+short tens_data;            // 16-bits for display of tens
+byte sevSeg;                // 7-segment bit pattern
+byte measurements;          // number of measurements taken
+byte sleepCounter;          // sleep cycles since last measurement
+byte humI;                  // integral part of humidity measurement
+byte humD;                  // decimal part of humidity measurement (we'll throw this away but it's returned so we need to put it somewhere)
+byte tempI;                 // integral part of temperature measurement
+byte tempD;                 // decimal part of temperature measurement (we'll throw this away but it's returned so we need to put it somewhere)
+bool firstPair;             // tracks which pair of 7-segments is on
+bool btnPress;              // tracks if button is pressed
+bool readTriggered;         // tracks if a reading was requested
+bool awakeTime;             // tracks if sleeping is allowed
+uint32_t oldMillis;         // tracks the last acquisition time
+uint32_t sleepTimer;        // tracks the wakeup time
+uint32_t buttonPressTime;   // tracks when the button was last pressed
 
 // Shifts 16 bits out MSB first, on the rising edge of the clock.
 void shiftOut(int dataPin, int clockPin, short toBeSent) {
@@ -95,9 +97,8 @@ void start_signal(byte SENSOR_PIN) {
 boolean read_dht11(byte SENSOR_PIN) {
   uint16_t rawHumidity = 0;
   uint16_t rawTemperature = 0;
-  uint8_t checkSum = 0;
   uint16_t data = 0;
-
+  uint8_t checkSum = 0;
   unsigned long startTime;
 
   for (int8_t i = -3; i < 80; i++) {  // loop 80 iterations, representing 40 bits * 2 (HIGH + LOW)
@@ -110,8 +111,8 @@ boolean read_dht11(byte SENSOR_PIN) {
     do {                                                  // waits for sensor to respond
       high_time = (unsigned long)(micros() - startTime);  // update HIGH time
       if (high_time > 90) {                               // times out after 90 microseconds
-        Serial.println("ERROR_TIMEOUT");
-        return;
+        //Serial.println("ERROR_TIMEOUT");
+        return false;
       }
     }
     while (digitalRead(SENSOR_PIN) == (i & 1) ? HIGH : LOW);
@@ -158,29 +159,32 @@ boolean read_dht11(byte SENSOR_PIN) {
 }
 
 void updateDisplay(){
-    start_signal(SENSOR); // send start sequence
+  cli(); //disable all interrupts for the duration of the read since the communication is rather timing-sensitive
+  start_signal(SENSOR); // send start sequence
 
-    if (read_dht11(SENSOR)) {
-      // update tens bit string
-      tens_data = 0b0000000000000000;     // reset to all 0s
-      tens_data |= numLookup[humI / 10];  // bitwise OR the result with the output short
-      tens_data = tens_data << 8;         // shift by 8 so it's almost in the right place (see below)
-      tens_data |= numLookup[tempI / 10]; // bitwise OR the result with the output short
-      tens_data = tens_data << 1;         // shift by 1 so everything is in the right place
-      tens_data |= 0b0000000000000001;    // set NPN for tens pair to active and ones NPN to inactive
+  if (read_dht11(SENSOR)) {
+    sei(); //enable all interrupts again since communication with sensor is over
+    
+    // update tens bit string
+    tens_data = 0b0000000000000000;     // reset to all 0s
+    tens_data |= numLookup[humI / 10];  // bitwise OR the result with the output short
+    tens_data = tens_data << 8;         // shift by 8 so it's almost in the right place (see below)
+    tens_data |= numLookup[tempI / 10]; // bitwise OR the result with the output short
+    tens_data = tens_data << 1;         // shift by 1 so everything is in the right place
+    tens_data |= 0b0000000000000001;    // set NPN for tens pair to active and ones NPN to inactive
 
-      // update ones bit string
-      ones_data = 0b0000000000000000;     // reset to all 0s
-      ones_data |= numLookup[humI % 10];  // bitwise OR the result with the output short
-      ones_data = ones_data << 8;         // shift by 8 so it's almost in the right place (see below)
-      ones_data |= numLookup[tempI % 10]; // bitwise OR the result with the output short
-      ones_data = ones_data << 1;         // shift by 1 so everything is in the right place
-      ones_data |= 0b0000000100000000;    // set NPN for ones pair to active and tens NPN to inactive
-    }
-    else {
-      tens_data = 0b1001111010011111;
-      ones_data = 0b0000101100001010;
-    }
+    // update ones bit string
+    ones_data = 0b0000000000000000;     // reset to all 0s
+    ones_data |= numLookup[humI % 10];  // bitwise OR the result with the output short
+    ones_data = ones_data << 8;         // shift by 8 so it's almost in the right place (see below)
+    ones_data |= numLookup[tempI % 10]; // bitwise OR the result with the output short
+    ones_data = ones_data << 1;         // shift by 1 so everything is in the right place
+    ones_data |= 0b0000000100000000;    // set NPN for ones pair to active and tens NPN to inactive
+  }
+  else {
+    tens_data = 0b1001111010011111;
+    ones_data = 0b0000101100001010;
+  }
 }
 
 void goToSleep() {
@@ -204,9 +208,12 @@ void goToSleep() {
 }
 
 ISR(PCINT0_vect) {
-  btnPress = true;
-  awakeTime = true;
-  sleepTimer = millis();
+  if(millis()-buttonPressTime >= ignoreButton){
+    buttonPressTime = millis();
+    btnPress = true;
+    awakeTime = true;
+    sleepTimer = millis();
+  }
 }
 
 // watchdog interrupt
@@ -256,6 +263,8 @@ void setup() {
   humD = 0;
   tempI = 0;
   tempD = 0;
+  buttonPressTime = 0;
+  ignoreButton = 50;
 
   digitalWrite(LATCH, 0);         // Set latch pin LOW so nothing gets shifted out
   shiftOut(DATA, CLK, tens_data); // shift out LED states for 7-segments of tens
@@ -305,7 +314,7 @@ void loop() {
       digitalWrite(LATCH, 1); //sent everything out in parallel
       delay(LED_DELAY);       //wait for some time until switching to the other displays
 
-      if ((millis() - sleepTimer) > 5000) { //Sleep after 6s display time
+      if ((millis() - sleepTimer) > 5000) { //Sleep after 5s display time
         sleepCounter = 0;
         awakeTime = false;
         goToSleep();
