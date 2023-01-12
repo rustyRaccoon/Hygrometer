@@ -6,6 +6,9 @@
   NPNs activated via 8th bit in 74HC595s, always alternating
   
   !! Needs to be set up with 8 MHz internal clock AND bootloader apparently !!
+  
+  In the first version (1.0) one of the 3-pin headers is turned around, switching the TENS_GND and ONES_GND!!
+  This needs to be corrected in updateDisplay() when setting the NPN bits
 
   Author:   ElectroBadger
   Date:     2022-12-19
@@ -171,7 +174,7 @@ void updateDisplay(){
     tens_data = tens_data << 8;         // shift by 8 so it's almost in the right place (see below)
     tens_data |= numLookup[tempI / 10]; // bitwise OR the result with the output short
     tens_data = tens_data << 1;         // shift by 1 so everything is in the right place
-    tens_data |= 0b0000000000000001;    // set NPN for tens pair to active and ones NPN to inactive
+    tens_data |= 0b0000000100000000;    // set NPN for tens pair to active and ones NPN to inactive
 
     // update ones bit string
     ones_data = 0b0000000000000000;     // reset to all 0s
@@ -179,7 +182,7 @@ void updateDisplay(){
     ones_data = ones_data << 8;         // shift by 8 so it's almost in the right place (see below)
     ones_data |= numLookup[tempI % 10]; // bitwise OR the result with the output short
     ones_data = ones_data << 1;         // shift by 1 so everything is in the right place
-    ones_data |= 0b0000000100000000;    // set NPN for ones pair to active and tens NPN to inactive
+    ones_data |= 0b0000000100000001;    // set NPN for ones pair to active and tens NPN to inactive
   }
   else {
     tens_data = 0b1001111010011111;
