@@ -10,6 +10,10 @@
   In the first version (1.0) one of the 3-pin headers is turned around, switching the TENS_GND and ONES_GND!!
   This needs to be corrected in updateDisplay() when setting the NPN bits
 
+Digits are
+tens  NPN_on | g | f | e | d | c | b | a
+ones  NPN_on | g | f | e | d | c | b | a
+
   Author:   rustyRaccoon
   Date:     2023-01-13
   Version:  6.0
@@ -26,7 +30,7 @@
 #define SENSOR PB3
 #define INT_PIN PB4
 
-//define other stuff
+//define other stuffU
 #define LED_DELAY 5
 
 //fixed variables
@@ -63,31 +67,132 @@ uint32_t sleepTimer;        //tracks the wakeup time
 uint32_t buttonPressTime;   //tracks when the button was last pressed
 uint32_t onTime;            //tracks the time one pair of digits should be on
 
-//shifts 16 bits out MSB first, on the rising edge of the clock.
-void shiftOut(int dataPin, int clockPin, short toBeSent) {
-  int i = 0;
-  int pinState = 0;
+void setup() {
+  resetWatchdog(); //do this first in case WDT fires
+  cli(); //disable interrupts during setup
 
-  //clear everything out just in case
-  digitalWrite(dataPin, 0);
-  digitalWrite(clockPin, 0);
+  pinMode(INT_PIN, INPUT_PULLUP); //set interrupt pin as input w/ internal pullup
+  pinMode(DATA, OUTPUT);          //set serial data as output
+  pinMode(CLK, OUTPUT);           //set shift register clock as output
+  pinMode(LATCH, OUTPUT);         //set output register (latch) clock as output
+  pinMode(SENSOR, INPUT);         //set DHT11 pin as input
 
-  //loop through bits in the data bytes
-  for (i = 0; i <= 15; i++) {
-    digitalWrite(clockPin, 0);
-    //if the value AND a bitmask result is true then set pinState to 1
-    if (toBeSent & (1 << i)) {
-      pinState = 1;
+  // Interrupts
+  PCMSK = bit(INT_PIN); //enable interrupt handler (ISR)
+  GIFR  |= bit(PCIF);   //clear any outstanding interrupts
+  GIMSK |= bit(PCIE);   //enable PCINT interrupt in the general interrupt mask
+
+  //default conditions
+  /*
+  bit 0-6: temperature segments
+  bit 7: NPN for single digits
+  bit 8-14: humidity segments
+  bit 15: NPN for tens digits
+  */
+  tens_data = 0b0000000000000000;
+  ones_data = 0b0000000000000000;
+  measurements = 0;
+  sleepCounter = 0;
+  firstPair = true;
+  btnPress = false;
+  awakeTime = false;
+  readTriggered = false;
+  lastAcquisition = 0;
+  sleepTimer = 0;
+  onTime = 0;
+  humI = 0;
+  humD = 0;
+  tempI = 0;
+  tempD = 0;
+  buttonPressTime = 0;
+  ignoreButton = 50;
+
+  digitalWrite(LATCH, 0);         //set latch pin LOW so nothing gets shifted out
+  shiftOut(DATA, CLK, tens_data); //shift out LED states for 7-segments of tens
+  digitalWrite(LATCH, 1);         //sent everything out in parallel
+
+  delay(2000);      //wait for DHT to be ready
+  updateDisplay();  //read DHT11 once in the beginning
+
+  lastAcquisition = millis();
+  while((millis()-lastAcquisition) >= 3000){
+    //shift out the next batch of data to the display
+    digitalWrite(LATCH, 0); //set latch pin LOW so nothing gets shifted out
+
+    if (firstPair) {
+      shiftOut(DATA, CLK, 0b0110000101100000); //shift out LED states for 7-segments of tens
+      firstPair = false;              //reset first digit flag
     }
     else {
-      pinState = 0;
+      shiftOut(DATA, CLK, 0b0010111000011111); //shift out LED states for 7-segments of ones
+      firstPair = true;               //set first digit flag
     }
 
-    digitalWrite(dataPin, pinState);  //sets the pin to HIGH or LOW depending on pinState
-    digitalWrite(clockPin, 1);        //shifts bits on upstroke of clock pin
-    digitalWrite(dataPin, 0);         //zero the data pin after shift to prevent bleed through
+    digitalWrite(LATCH, 1); //sent everything out in parallel
+    delay(LED_DELAY); //wait for some time until switching to the other displays    
   }
-  digitalWrite(clockPin, 0);          //stop shifting
+  
+  sei(); //enable interrupts after setup
+}
+
+void loop() {
+  //if 5 minutes are not over yet, increase counter and sleep again; button press overrules this
+  if (sleepCounter <= 38 && !btnPress) {
+    sleepCounter++;
+    goToSleep();
+  }
+  else {
+    awakeTime = true; //keep awake until action is done
+    
+    //need to wait two seconds until sensor is ready (I think; maybe next time I'll try without this but now I'm pressed for time)
+    if (!readTriggered && (millis() - lastAcquisition) > 2000) {
+      readTriggered = true;
+      lastAcquisition = millis();
+    }
+    else if (readTriggered && (millis() - lastAcquisition) > 2000) { //slow sensor, so readings may be up to 2 seconds old
+      updateDisplay();
+
+      readTriggered = false;
+      measurements++;
+      lastAcquisition = millis();
+    }
+
+    if (btnPress) {
+      // if((millis()-onTime)>=LED_DELAY){
+      //   onTime = millis(); //update timestamp
+        
+        //shift out the next batch of data to the display
+        digitalWrite(LATCH, 0); //set latch pin LOW so nothing gets shifted out
+
+        if (firstPair) {
+          shiftOut(DATA, CLK, tens_data); //shift out LED states for 7-segments of tens
+          firstPair = false;              //reset first digit flag
+        }
+        else {
+          shiftOut(DATA, CLK, ones_data); //shift out LED states for 7-segments of ones
+          firstPair = true;               //set first digit flag
+        }
+
+        digitalWrite(LATCH, 1); //sent everything out in parallel
+        delay(LED_DELAY); //wait for some time until switching to the other displays
+        
+        //sleep after 5s display time
+        if ((millis() - sleepTimer) > 5000) { 
+          sleepCounter = 0;
+          awakeTime = false;
+          goToSleep();
+        }
+      // }
+    }
+    else {
+      //we want to acquire at least one measurement so I'm explicitly checking that
+      if (measurements >= 2) {
+        sleepCounter = 0;
+        awakeTime = false;
+        goToSleep();
+      }
+    }
+  }
 }
 
 void start_signal(byte SENSOR_PIN) {
@@ -165,7 +270,7 @@ boolean read_dht11(byte SENSOR_PIN) {
 }
 
 void updateDisplay(){
-  cli(); //disable all interrupts for the duration of the read since the communication is rather timing-sensitive
+  //cli(); //disable all interrupts for the duration of the read since the communication is rather timing-sensitive
   start_signal(SENSOR); //send start sequence
 
   if (read_dht11(SENSOR)) {    
@@ -183,14 +288,14 @@ void updateDisplay(){
     ones_data = ones_data << 8;         //shift by 8 so it's almost in the right place (see below)
     ones_data |= numLookup[tempI % 10]; //bitwise OR the result with the output short
     ones_data = ones_data << 1;         //shift by 1 so everything is in the right place
-    ones_data |= 0b0000000100000001;    //set NPN for ones pair to active and tens NPN to inactive
+    ones_data |= 0b0000000000000001;    //set NPN for ones pair to active and tens NPN to inactive
   }
   else {
     tens_data = 0b1001111110011110;
     ones_data = 0b0000101000001011;
   }
   
-  sei(); //enable all interrupts again since communication with sensor is over
+  //sei(); //enable all interrupts again since communication with sensor is over
 }
 
 void goToSleep() {
@@ -234,111 +339,29 @@ void resetWatchdog() {
   wdt_reset();
 }
 
-void setup() {
-  resetWatchdog(); //do this first in case WDT fires
-  cli(); //disable interrupts during setup
+//shifts 16 bits out LSB first, on the rising edge of the clock.
+void shiftOut(int dataPin, int clockPin, short toBeSent) {
+  int i = 0;
+  int pinState = 0;
 
-  pinMode(INT_PIN, INPUT_PULLUP); //set interrupt pin as input w/ internal pullup
-  pinMode(DATA, OUTPUT);          //set serial data as output
-  pinMode(CLK, OUTPUT);           //set shift register clock as output
-  pinMode(LATCH, OUTPUT);         //set output register (latch) clock as output
-  pinMode(SENSOR, INPUT);         //set DHT11 pin as input
+  //clear everything out just in case
+  digitalWrite(dataPin, 0);
+  digitalWrite(clockPin, 0);
 
-  // Interrupts
-  PCMSK = bit(INT_PIN); //enable interrupt handler (ISR)
-  GIFR  |= bit(PCIF);   //clear any outstanding interrupts
-  GIMSK |= bit(PCIE);   //enable PCINT interrupt in the general interrupt mask
-
-  //default conditions
-  /*
-  bit 0-6: single digits
-  bit 7: NPN for single digits
-  bit 8-14: tens digits
-  bit 15: NPN for tens digits
-  */
-  ones_data = 0b0000000000000000;
-  tens_data = 0b0000000000000000;
-  measurements = 0;
-  sleepCounter = 0;
-  firstPair = true;
-  btnPress = false;
-  awakeTime = false;
-  readTriggered = false;
-  lastAcquisition = 0;
-  sleepTimer = 0;
-  onTime = 0;
-  humI = 0;
-  humD = 0;
-  tempI = 0;
-  tempD = 0;
-  buttonPressTime = 0;
-  ignoreButton = 50;
-
-  digitalWrite(LATCH, 0);         //set latch pin LOW so nothing gets shifted out
-  shiftOut(DATA, CLK, tens_data); //shift out LED states for 7-segments of tens
-  digitalWrite(LATCH, 1);         //sent everything out in parallel
-
-  delay(2000);      //wait for DHT to be ready
-  updateDisplay();  //read DHT11 once in the beginning
-  
-  sei(); //enable interrupts after setup
-}
-
-void loop() {
-  //if 5 minutes are not over yet, increase counter and sleep again; button press overrules this
-  if (sleepCounter <= 38 && !btnPress) {
-    sleepCounter++;
-    goToSleep();
-  }
-  else {
-    awakeTime = true; //keep awake until action is done
-    
-    //need to wait two seconds until sensor is ready (I think; maybe next time I'll try without this but now I'm pressed for time)
-    if (!readTriggered && (millis() - lastAcquisition) > 2000) {
-      readTriggered = true;
-      lastAcquisition = millis();
-    }
-    else if (readTriggered && (millis() - lastAcquisition) > 2000) { //slow sensor, so readings may be up to 2 seconds old
-      updateDisplay();
-
-      readTriggered = false;
-      measurements++;
-      lastAcquisition = millis();
-    }
-
-    if (btnPress) {
-      if((millis()-onTime)>=LED_DELAY){
-        onTime = millis(); //update timestamp
-        
-        //shift out the next batch of data to the display
-        digitalWrite(LATCH, 0); //set latch pin LOW so nothing gets shifted out
-
-        if (firstPair) {
-          shiftOut(DATA, CLK, tens_data); //shift out LED states for 7-segments of tens
-          firstPair = false;              //reset first digit flag
-        }
-        else {
-          shiftOut(DATA, CLK, ones_data); //shift out LED states for 7-segments of ones
-          firstPair = true;               //set first digit flag
-        }
-
-        digitalWrite(LATCH, 1); //sent everything out in parallel
-        //delay(LED_DELAY); //wait for some time until switching to the other displays
-        
-        //sleep after 5s display time
-        if ((millis() - sleepTimer) > 5000) { 
-          sleepCounter = 0;
-          awakeTime = false;
-          goToSleep();
-        }
-      }
+  //loop through bits in the data bytes
+  for (i = 0; i <= 15; i++) {
+    digitalWrite(clockPin, 0);
+    //if the value AND a bitmask result is true then set pinState to 1
+    if (toBeSent & (1 << i)) {
+      pinState = 1;
     }
     else {
-      if (measurements >= 2) {
-        sleepCounter = 0;
-        awakeTime = false;
-        goToSleep();
-      }
+      pinState = 0;
     }
+
+    digitalWrite(dataPin, pinState);  //sets the pin to HIGH or LOW depending on pinState
+    digitalWrite(clockPin, 1);        //shifts bits on upstroke of clock pin
+    digitalWrite(dataPin, 0);         //zero the data pin after shift to prevent bleed through
   }
+  digitalWrite(clockPin, 0);          //stop shifting
 }
