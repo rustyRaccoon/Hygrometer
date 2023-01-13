@@ -10,27 +10,27 @@
   In the first version (1.0) one of the 3-pin headers is turned around, switching the TENS_GND and ONES_GND!!
   This needs to be corrected in updateDisplay() when setting the NPN bits
 
-  Author:   ElectroBadger
-  Date:     2022-12-19
-  Version:  5.0
+  Author:   rustyRaccoon
+  Date:     2023-01-13
+  Version:  6.0
 */
 
-#include <avr/sleep.h>  // Sleep Modes
-#include <avr/power.h>  // Power management
-#include <avr/wdt.h>    // Doggy stuff
+#include <avr/sleep.h>  //sleep Modes
+#include <avr/power.h>  //power management
+#include <avr/wdt.h>    //doggy stuff
 
-// define attiny pins
+//define attiny pins
 #define CLK PB0
 #define DATA PB1
 #define LATCH PB2
 #define SENSOR PB3
 #define INT_PIN PB4
 
-// define other stuff
+//define other stuff
 #define LED_DELAY 5
 
 //fixed variables
-uint8_t ignoreButton;         // time to ignore button presses for
+uint8_t ignoreButton;         //time to ignore button presses for
 const byte numLookup[] = {    //array lookup for number display; ascending order: 0, 1, 2, ...
   0b01111110, //0
   0b00110000, //1
@@ -45,36 +45,37 @@ const byte numLookup[] = {    //array lookup for number display; ascending order
 };
 
 // changing variables
-short ones_data;            // 16-bits for display of ones
-short tens_data;            // 16-bits for display of tens
-byte sevSeg;                // 7-segment bit pattern
-byte measurements;          // number of measurements taken
-byte sleepCounter;          // sleep cycles since last measurement
-byte humI;                  // integral part of humidity measurement
-byte humD;                  // decimal part of humidity measurement (we'll throw this away but it's returned so we need to put it somewhere)
-byte tempI;                 // integral part of temperature measurement
-byte tempD;                 // decimal part of temperature measurement (we'll throw this away but it's returned so we need to put it somewhere)
-bool firstPair;             // tracks which pair of 7-segments is on
-bool btnPress;              // tracks if button is pressed
-bool readTriggered;         // tracks if a reading was requested
-bool awakeTime;             // tracks if sleeping is allowed
-uint32_t oldMillis;         // tracks the last acquisition time
-uint32_t sleepTimer;        // tracks the wakeup time
-uint32_t buttonPressTime;   // tracks when the button was last pressed
+short ones_data;            //16-bits for display of ones
+short tens_data;            //16-bits for display of tens
+byte sevSeg;                //7-segment bit pattern
+byte measurements;          //number of measurements taken
+byte sleepCounter;          //sleep cycles since last measurement
+byte humI;                  //integral part of humidity measurement
+byte humD;                  //decimal part of humidity measurement (we'll throw this away but it's returned so we need to put it somewhere)
+byte tempI;                 //integral part of temperature measurement
+byte tempD;                 //decimal part of temperature measurement (we'll throw this away but it's returned so we need to put it somewhere)
+bool firstPair;             //tracks which pair of 7-segments is on
+bool btnPress;              //tracks if button is pressed
+bool readTriggered;         //tracks if a reading was requested
+bool awakeTime;             //tracks if sleeping is allowed
+uint32_t lastAcquisition;   //tracks the last acquisition time
+uint32_t sleepTimer;        //tracks the wakeup time
+uint32_t buttonPressTime;   //tracks when the button was last pressed
+uint32_t onTime;            //tracks the time one pair of digits should be on
 
-// Shifts 16 bits out MSB first, on the rising edge of the clock.
+//shifts 16 bits out MSB first, on the rising edge of the clock.
 void shiftOut(int dataPin, int clockPin, short toBeSent) {
   int i = 0;
   int pinState = 0;
 
-  // Clear everything out just in case
+  //clear everything out just in case
   digitalWrite(dataPin, 0);
   digitalWrite(clockPin, 0);
 
-  // Loop through bits in the data bytes
+  //loop through bits in the data bytes
   for (i = 0; i <= 15; i++) {
     digitalWrite(clockPin, 0);
-    // if the value AND a bitmask result is true then set pinState to 1
+    //if the value AND a bitmask result is true then set pinState to 1
     if (toBeSent & (1 << i)) {
       pinState = 1;
     }
@@ -82,19 +83,19 @@ void shiftOut(int dataPin, int clockPin, short toBeSent) {
       pinState = 0;
     }
 
-    digitalWrite(dataPin, pinState);  // sets the pin to HIGH or LOW depending on pinState
-    digitalWrite(clockPin, 1);        // shifts bits on upstroke of clock pin
-    digitalWrite(dataPin, 0);         // zero the data pin after shift to prevent bleed through
+    digitalWrite(dataPin, pinState);  //sets the pin to HIGH or LOW depending on pinState
+    digitalWrite(clockPin, 1);        //shifts bits on upstroke of clock pin
+    digitalWrite(dataPin, 0);         //zero the data pin after shift to prevent bleed through
   }
-  digitalWrite(clockPin, 0);          // Stop shifting
+  digitalWrite(clockPin, 0);          //stop shifting
 }
 
 void start_signal(byte SENSOR_PIN) {
-  pinMode(SENSOR_PIN, OUTPUT);        // set pin as output
-  digitalWrite(SENSOR_PIN, LOW);      // set pin LOW
-  delay(18);                          // wait 18 ms
-  digitalWrite(SENSOR_PIN, HIGH);     // set pin HIGH
-  pinMode(SENSOR_PIN, INPUT_PULLUP);  // set pin as input and pull to VCC (10k)
+  pinMode(SENSOR_PIN, OUTPUT);        //set pin as output
+  digitalWrite(SENSOR_PIN, LOW);      //set pin LOW
+  delay(18);                          //wait 18 ms
+  digitalWrite(SENSOR_PIN, HIGH);     //set pin HIGH
+  pinMode(SENSOR_PIN, INPUT_PULLUP);  //set pin as input and pull to VCC (10k)
 }
 
 boolean read_dht11(byte SENSOR_PIN) {
@@ -104,51 +105,53 @@ boolean read_dht11(byte SENSOR_PIN) {
   uint8_t checkSum = 0;
   unsigned long startTime;
 
-  for (int8_t i = -3; i < 80; i++) {  // loop 80 iterations, representing 40 bits * 2 (HIGH + LOW)
-    byte high_time;                   // stores the HIGH time of the signal
-    startTime = micros();             // stores the time the data transfer started
+  for (int8_t i = -3; i < 80; i++) {  //loop 80 iterations, representing 40 bits * 2 (HIGH + LOW)
+    byte high_time;                   //stores the HIGH time of the signal
+    startTime = micros();             //stores the time the data transfer started
 
-    // sensor should pull line LOW and keep for 80µs (while SENSOR_PIN == HIGH)
-    // then pull HIGH and keep for 80µs (while SENSOR_PIN == LOW)
-    // then pull LOW again, aka send data (while SENSOR_PIN == HIGH)
-    do {                                                  // waits for sensor to respond
-      high_time = (unsigned long)(micros() - startTime);  // update HIGH time
-      if (high_time > 90) {                               // times out after 90 microseconds
+    /*
+    sensor should pull line LOW and keep for 80µs (while SENSOR_PIN == HIGH)
+    then pull HIGH and keep for 80µs (while SENSOR_PIN == LOW)
+    then pull LOW again, aka send data (while SENSOR_PIN == HIGH)
+    */
+    do {                                                  //waits for sensor to respond
+      high_time = (unsigned long)(micros() - startTime);  //update HIGH time
+      if (high_time > 90) {                               //times out after 90 microseconds
         //Serial.println("ERROR_TIMEOUT");
         return false;
       }
     }
     while (digitalRead(SENSOR_PIN) == (i & 1) ? HIGH : LOW);
 
-    // actual data starts at iteration 0
-    if (i >= 0 && (i & 1)) {  // if counter is odd, do this (only counts t_on time and ignores t_off)
-      data <<= 1;             // left shift data stream by 1 since we are at a the next bit
+    //actual data starts at iteration 0
+    if (i >= 0 && (i & 1)) {  //if counter is odd, do this (only counts t_on time and ignores t_off)
+      data <<= 1;             //left shift data stream by 1 since we are at a the next bit
 
-      // TON of bit 0 is maximum 30µs and of bit 1 is at least 68µs
+      //t_on of bit 0 is maximum 30µs and of bit 1 is at least 68µs
       if (high_time > 30) {
-        data |= 1; // we got a one
+        data |= 1; //we got a one
       }
     }
 
     switch ( i ) {
-      case 31:                  // bit 0-16 is humidity
+      case 31:                  //bit 0-16 is humidity
         rawHumidity = data;
         break;
-      case 63:                  // bit 17-32 is temperature
+      case 63:                  //bit 17-32 is temperature
         rawTemperature = data;
-      case 79:                  // bit 33-40 is checksum
+      case 79:                  //bit 33-40 is checksum
         checkSum = data;
         data = 0;
         break;
     }
   }
 
-  // Humidity
+  //humidity
   humI = rawHumidity >> 8;
   rawHumidity = rawHumidity << 8;
   humD = rawHumidity >> 8;
 
-  // Temperature
+  //temperature
   tempI = rawTemperature >> 8;
   rawTemperature = rawTemperature << 8;
   tempD = rawTemperature >> 8;
@@ -163,51 +166,51 @@ boolean read_dht11(byte SENSOR_PIN) {
 
 void updateDisplay(){
   cli(); //disable all interrupts for the duration of the read since the communication is rather timing-sensitive
-  start_signal(SENSOR); // send start sequence
+  start_signal(SENSOR); //send start sequence
 
-  if (read_dht11(SENSOR)) {
-    sei(); //enable all interrupts again since communication with sensor is over
-    
+  if (read_dht11(SENSOR)) {    
     // update tens bit string
-    tens_data = 0b0000000000000000;     // reset to all 0s
-    tens_data |= numLookup[humI / 10];  // bitwise OR the result with the output short
-    tens_data = tens_data << 8;         // shift by 8 so it's almost in the right place (see below)
-    tens_data |= numLookup[tempI / 10]; // bitwise OR the result with the output short
-    tens_data = tens_data << 1;         // shift by 1 so everything is in the right place
-    tens_data |= 0b0000000100000000;    // set NPN for tens pair to active and ones NPN to inactive
+    tens_data = 0b0000000000000000;     //reset to all 0s
+    tens_data |= numLookup[humI / 10];  //bitwise OR the result with the output short
+    tens_data = tens_data << 8;         //shift by 8 so it's almost in the right place (see below)
+    tens_data |= numLookup[tempI / 10]; //bitwise OR the result with the output short
+    tens_data = tens_data << 1;         //shift by 1 so everything is in the right place
+    tens_data |= 0b0000000100000000;    //set NPN for tens pair to active and ones NPN to inactive
 
     // update ones bit string
-    ones_data = 0b0000000000000000;     // reset to all 0s
-    ones_data |= numLookup[humI % 10];  // bitwise OR the result with the output short
-    ones_data = ones_data << 8;         // shift by 8 so it's almost in the right place (see below)
-    ones_data |= numLookup[tempI % 10]; // bitwise OR the result with the output short
-    ones_data = ones_data << 1;         // shift by 1 so everything is in the right place
-    ones_data |= 0b0000000100000001;    // set NPN for ones pair to active and tens NPN to inactive
+    ones_data = 0b0000000000000000;     //reset to all 0s
+    ones_data |= numLookup[humI % 10];  //bitwise OR the result with the output short
+    ones_data = ones_data << 8;         //shift by 8 so it's almost in the right place (see below)
+    ones_data |= numLookup[tempI % 10]; //bitwise OR the result with the output short
+    ones_data = ones_data << 1;         //shift by 1 so everything is in the right place
+    ones_data |= 0b0000000100000001;    //set NPN for ones pair to active and tens NPN to inactive
   }
   else {
-    tens_data = 0b1001111010011111;
-    ones_data = 0b0000101100001010;
+    tens_data = 0b1001111110011110;
+    ones_data = 0b0000101000001011;
   }
+  
+  sei(); //enable all interrupts again since communication with sensor is over
 }
 
 void goToSleep() {
-  // Turn off 7-segments and NPNs
+  //turn off 7-segments and NPNs
   digitalWrite(LATCH, 0);
   shiftOut(DATA, CLK, 0b0000000000000000);
   digitalWrite(LATCH, 1);
 
-  set_sleep_mode (SLEEP_MODE_PWR_DOWN); // Set deep sleep mode
-  ADCSRA = 0;                           // turn off ADC
-  power_all_disable ();                 // power off ADC, Timer 0 and 1, serial interface
-  cli();                                // timed sequence coming up, so disable interrupts
-  btnPress = false;                     // reset button flag
-  measurements = 0;                     // reset measurement counter
-  resetWatchdog ();                     // get watchdog ready
-  sleep_enable ();                      // ready to sleep
-  sei();                                // interrupts are required now
-  sleep_cpu ();                         // sleep
-  sleep_disable ();                     // precaution
-  power_all_enable ();                  // power everything back on
+  set_sleep_mode (SLEEP_MODE_PWR_DOWN); //set deep sleep mode
+  ADCSRA = 0;                           //turn off ADC
+  power_all_disable ();                 //power off ADC, Timer 0 and 1, serial interface
+  cli();                                //timed sequence coming up, so disable interrupts
+  btnPress = false;                     //reset button flag
+  measurements = 0;                     //reset measurement counter
+  resetWatchdog ();                     //get watchdog ready
+  sleep_enable ();                      //ready to sleep
+  sei();                                //interrupts are required now
+  sleep_cpu ();                         //sleep
+  sleep_disable ();                     //precaution
+  power_all_enable ();                  //power everything back on
 }
 
 ISR(PCINT0_vect) {
@@ -219,9 +222,9 @@ ISR(PCINT0_vect) {
   }
 }
 
-// watchdog interrupt
+//watchdog interrupt
 ISR(WDT_vect) {
-  wdt_disable(); // disable watchdog
+  wdt_disable(); //disable watchdog
 }
 
 void resetWatchdog() {
@@ -232,25 +235,26 @@ void resetWatchdog() {
 }
 
 void setup() {
-  resetWatchdog(); // do this first in case WDT fires
-  cli(); // disable interrupts during setup
+  resetWatchdog(); //do this first in case WDT fires
+  cli(); //disable interrupts during setup
 
-  pinMode(INT_PIN, INPUT_PULLUP); // set interrupt pin as input w/ internal pullup
+  pinMode(INT_PIN, INPUT_PULLUP); //set interrupt pin as input w/ internal pullup
   pinMode(DATA, OUTPUT);          //set serial data as output
   pinMode(CLK, OUTPUT);           //set shift register clock as output
   pinMode(LATCH, OUTPUT);         //set output register (latch) clock as output
   pinMode(SENSOR, INPUT);         //set DHT11 pin as input
 
   // Interrupts
-  PCMSK = bit(INT_PIN);   // enable interrupt handler (ISR)
-  GIFR  |= bit(PCIF);     // clear any outstanding interrupts
-  GIMSK |= bit(PCIE);     // enable PCINT interrupt in the general interrupt mask
+  PCMSK = bit(INT_PIN); //enable interrupt handler (ISR)
+  GIFR  |= bit(PCIF);   //clear any outstanding interrupts
+  GIMSK |= bit(PCIE);   //enable PCINT interrupt in the general interrupt mask
 
   //default conditions
-  /*  bit 0-6: ones digits
-    bit 7: NPN for units digits
-    bit 8-14: ones digits
-    bit 15: NPN for tens digits
+  /*
+  bit 0-6: single digits
+  bit 7: NPN for single digits
+  bit 8-14: tens digits
+  bit 15: NPN for tens digits
   */
   ones_data = 0b0000000000000000;
   tens_data = 0b0000000000000000;
@@ -260,8 +264,9 @@ void setup() {
   btnPress = false;
   awakeTime = false;
   readTriggered = false;
-  oldMillis = 0;
+  lastAcquisition = 0;
   sleepTimer = 0;
+  onTime = 0;
   humI = 0;
   humD = 0;
   tempI = 0;
@@ -269,18 +274,18 @@ void setup() {
   buttonPressTime = 0;
   ignoreButton = 50;
 
-  digitalWrite(LATCH, 0);         // Set latch pin LOW so nothing gets shifted out
-  shiftOut(DATA, CLK, tens_data); // shift out LED states for 7-segments of tens
+  digitalWrite(LATCH, 0);         //set latch pin LOW so nothing gets shifted out
+  shiftOut(DATA, CLK, tens_data); //shift out LED states for 7-segments of tens
   digitalWrite(LATCH, 1);         //sent everything out in parallel
 
-  delay(2000);      // wait for DHT to be ready
-  updateDisplay();  // read DHT11 once in the beginning
+  delay(2000);      //wait for DHT to be ready
+  updateDisplay();  //read DHT11 once in the beginning
   
-  sei(); // enable interrupts after setup
+  sei(); //enable interrupts after setup
 }
 
 void loop() {
-  // if 5 minutes are not over yet, increase counter and sleep again; button press overrules this
+  //if 5 minutes are not over yet, increase counter and sleep again; button press overrules this
   if (sleepCounter <= 38 && !btnPress) {
     sleepCounter++;
     goToSleep();
@@ -288,39 +293,44 @@ void loop() {
   else {
     awakeTime = true; //keep awake until action is done
     
-    if (!readTriggered && (millis() - oldMillis) > 2000) {
+    //need to wait two seconds until sensor is ready (I think; maybe next time I'll try without this but now I'm pressed for time)
+    if (!readTriggered && (millis() - lastAcquisition) > 2000) {
       readTriggered = true;
-      oldMillis = millis();
+      lastAcquisition = millis();
     }
-    else if (readTriggered && (millis() - oldMillis) > 2000) {
-      // slow sensor, so readings may be up to 2 seconds old
+    else if (readTriggered && (millis() - lastAcquisition) > 2000) { //slow sensor, so readings may be up to 2 seconds old
       updateDisplay();
 
       readTriggered = false;
       measurements++;
-      oldMillis = millis();
+      lastAcquisition = millis();
     }
 
     if (btnPress) {
-      // shift out the next batch of data to the display
-      digitalWrite(LATCH, 0); // Set latch pin LOW so nothing gets shifted out
+      if((millis()-onTime)>=LED_DELAY){
+        onTime = millis(); //update timestamp
+        
+        //shift out the next batch of data to the display
+        digitalWrite(LATCH, 0); //set latch pin LOW so nothing gets shifted out
 
-      if (firstPair) {
-        shiftOut(DATA, CLK, tens_data); // shift out LED states for 7-segments of tens
-        firstPair = false;              // reset first digit flag
-      }
-      else {
-        shiftOut(DATA, CLK, ones_data); //Shift out LED states for 7-segments of ones
-        firstPair = true;               //set first digit flag
-      }
+        if (firstPair) {
+          shiftOut(DATA, CLK, tens_data); //shift out LED states for 7-segments of tens
+          firstPair = false;              //reset first digit flag
+        }
+        else {
+          shiftOut(DATA, CLK, ones_data); //shift out LED states for 7-segments of ones
+          firstPair = true;               //set first digit flag
+        }
 
-      digitalWrite(LATCH, 1); //sent everything out in parallel
-      delay(LED_DELAY);       //wait for some time until switching to the other displays
-
-      if ((millis() - sleepTimer) > 5000) { //Sleep after 5s display time
-        sleepCounter = 0;
-        awakeTime = false;
-        goToSleep();
+        digitalWrite(LATCH, 1); //sent everything out in parallel
+        //delay(LED_DELAY); //wait for some time until switching to the other displays
+        
+        //sleep after 5s display time
+        if ((millis() - sleepTimer) > 5000) { 
+          sleepCounter = 0;
+          awakeTime = false;
+          goToSleep();
+        }
       }
     }
     else {
