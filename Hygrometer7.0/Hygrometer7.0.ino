@@ -66,6 +66,7 @@ uint32_t lastAcquisition;   //tracks the last acquisition time
 uint32_t sleepTimer;        //tracks the wakeup time
 uint32_t buttonPressTime;   //tracks when the button was last pressed
 uint32_t onTime;            //tracks the time one pair of digits should be on
+uint16_t iteration;          //generic variable in case I need to loop something
 
 void setup() {
   resetWatchdog(); //do this first in case WDT fires
@@ -107,34 +108,30 @@ void setup() {
   buttonPressTime = 0;
   ignoreButton = 50;
 
-  digitalWrite(LATCH, 0);         //set latch pin LOW so nothing gets shifted out
-  shiftOut(DATA, CLK, tens_data); //shift out LED states for 7-segments of tens
-  digitalWrite(LATCH, 1);         //sent everything out in parallel
-
-  delay(2000);      //wait for DHT to be ready
-  updateDisplay();  //read DHT11 once in the beginning
-
-  lastAcquisition = millis();
-  while((millis()-lastAcquisition) <= 3000){ //changed from >= 3000 to <= 30000, I think this is where the massive delay came from
+  for(iteration=0; iteration<=16384; iteration++){ //This should give approximately 2 seconds since we're always waiting 50ms between increments
     //shift out the next batch of data to the display
     digitalWrite(LATCH, 0); //set latch pin LOW so nothing gets shifted out
 
     if (firstPair) {
-      //shiftOut(DATA, CLK, 0b0110000101100000); //shift out LED states for 7-segments of tens OLD (and wrong I think)
-      shiftOut(DATA, CLK, 0b1011000000010000); //shift out LED states for 7-segments of tens
+      shiftOut(DATA, CLK, 0b0010000100100000); //shift out LED states for 7-segments of tens | a / b / c / d / e / f / g / NPN_TENS / a / b / c / d / e / f / g / NPN_ONES
       firstPair = false;              //reset first digit flag
     }
     else {
-      //shiftOut(DATA, CLK, 0b0010101000011111); //shift out LED states for 7-segments of ones OLD (and wrong I think)
-      shiftOut(DATA, CLK, 0b0001010110001111); //shift out LED states for 7-segments of ones
+      shiftOut(DATA, CLK, 0b0010101000011111); //shift out LED states for 7-segments of ones
       firstPair = true;               //set first digit flag
     }
 
-    digitalWrite(LATCH, 1); //sent everything out in parallel
-    delay(LED_DELAY); //wait for some time until switching to the other displays    
+    digitalWrite(LATCH, 1); //send everything out in parallel
   }
-  
-  sei(); //enable interrupts after setup
+
+  digitalWrite(LATCH, 0); //set latch pin LOW so nothing gets shifted out
+  shiftOut(DATA, CLK, 0b0000000000000000);
+  digitalWrite(LATCH, 1); //send everything out in parallel
+
+  sei(); //enable interrupts after setup; beware that millis() and delay() need interrupts enabled. Duh.
+
+  delay(2000);      //wait for DHT to be ready
+  updateDisplay();  //read DHT11 once in the beginning
 }
 
 void loop() {
